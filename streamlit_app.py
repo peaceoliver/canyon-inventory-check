@@ -233,20 +233,24 @@ def check_and_alert(watched_df):
                     if current_price_num is None and link_el:
                         # Végső mentőöv, ha nincs meg a JSON-ben az ár, kivesszük az aria-labelből
                         aria_label = link_el.get('aria-label', '') if link_el else ''
-                        price_match = re.search(r'Price:\s*([0-9.,\s]+)', aria_label)
+                        
+                        # JAVÍTOTT REGEX: Bármilyen szövegkörnyezetből kiszedi a számokat, amik az € jel előtt vannak
+                        price_match = re.search(r'([0-9.,\s]+)\s*€', aria_label)
                         if price_match:
                             try:
-                                # Kiszedjük a pontokat/vesszőket, hogy tiszta számot kapjunk
-                                clean_p = price_match.group(1).replace('.', '').replace(',', '').strip()
+                                # Tisztítjuk a karaktereket (szóközök, pontok eltávolítása a float-hoz)
+                                clean_p = price_match.group(1).replace('.', '').replace(',', '').replace('\xa0', '').strip()
+                                # Ha a Canyon esetleg tizedesjegyet is küld a végén (pl. .00 vagy ,00), azt levágjuk
+                                if len(clean_p) > 2 and (clean_p[-2:] == "00"):
+                                    clean_p = clean_p[:-2]
                                 current_price_num = float(clean_p)
                             except ValueError:
                                 pass
 
                     # Szigorú Python oldali árszűrés mentőövként:
-                    # Ha sikerült beazonosítani a bringa árát, ellenőrizzük a te általad megadott korlátokat
                     if current_price_num is not None:
                         if pmin and current_price_num < float(pmin):
-                            continue  # Túl olcsó (pl. 16 eurós alkatrész), eldobjuk!
+                            continue  # Túl olcsó (alkatrész), eldobjuk!
                         if pmax and current_price_num > float(pmax):
                             continue  # Túl drága, eldobjuk!
 
