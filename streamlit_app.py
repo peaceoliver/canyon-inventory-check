@@ -24,6 +24,10 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
+    # HA KORÁBBAN ROSSZUL Regisztrálódott, eldobjuk a táblát, hogy tisztán épüljön újra
+    # Nyugodtan törölhető ez a DROP sor az első sikeres lefutás után!
+    cursor.execute('DROP TABLE IF EXISTS watched_bikes')
+    
     # Új struktúra pmin és pmax értékekkel
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS watched_bikes (
@@ -48,6 +52,7 @@ def init_db():
     
     conn.commit()
     conn.close()
+
 
 def get_watched_bikes():
     conn = sqlite3.connect(DB_FILE)
@@ -431,6 +436,7 @@ def main():
                 st.info("A figyelt modellek közül pillanatnyilag egyik sincs készleten a megadott méretekben és ársávban.")
 
     # --- CRON / BACKGROUND TRIGGER AUTOMATIZÁCIÓ ---
+    #cron-job.org
     if st.query_params.get("run") == "true":
         if not watched_df.empty:
             check_and_alert(watched_df)
