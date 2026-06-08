@@ -1,5 +1,7 @@
 import os
 import time
+import json
+import re
 import sqlite3
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -18,63 +20,64 @@ from webdriver_manager.chrome import ChromeDriverManager
 DB_FILE = "canyon_watcher.db"
 
 def init_db():
-    """Létrehozza a keresési feltételek és a beállítások tábláját, ha még nem léteznek."""
+    """Létrehozza a keresési feltételek és az utolsó kiküldött állapotok tábláit."""
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    # Figyelt kerékpárok táblája
+    
+    # Új struktúra pmin és pmax értékekkel
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS watched_bikes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             model TEXT NOT NULL,
             size TEXT NOT NULL,
+            email TEXT NOT NULL,
+            pmin INTEGER DEFAULT 0,
+            pmax INTEGER DEFAULT 99999,
             added_at TEXT NOT NULL
         )
     ''')
-    # Globális értesítési e-mail cím táblája
+    
+    # ÚJ TÁBLA: Az e-mail címenként elmentett utolsó állapot hash-eléséhez
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
+        CREATE TABLE IF NOT EXISTS last_email_states (
+            email TEXT PRIMARY KEY,
+            content_hash TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         )
     ''')
+    
     conn.commit()
     conn.close()
 
 def get_watched_bikes():
     conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT id, model, size FROM watched_bikes", conn)
+    df = pd.read_sql_query("SELECT id, model, size, email, pmin, pmax FROM watched_bikes", conn)
     conn.close()
     return df
 
-def add_watched_bike(model, size):
+def add_watched_bike(model, size, email, pmin, pmax):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO watched_bikes (model, size, added_at) VALUES (?, ?, ?)", 
-                   (model.strip().lower(), size, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    cursor.execute("INSERT INTO watched_bikes (model, size, email, pmin, pmax, added_at) VALUES (?, ?, ?, ?, ?, ?)", 
+                   (model.strip().lower(), size, email.strip().lower(), int(pmin), int(pmax), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     conn.close()
 
-def delete_watched_bike(bike_id):
+def check_and_delete_bike(bike_id, email):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM watched_bikes WHERE id = ?", (bike_id,))
-    conn.commit()
-    conn.close()
-
-def get_email_setting():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT value FROM settings WHERE key = 'recipient_email'")
+    cursor.execute("SELECT id FROM watched_bikes WHERE id = ? AND email = ?", (bike_id, email.strip().lower()))
     row = cursor.fetchone()
-    conn.close()
-    return row[0] if row else "valaki@example.com"
-
-def save_email_setting(email):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('recipient_email', ?)", (email.strip(),))
+    
+    if row:
+        cursor.execute("DELETE FROM watched_bikes WHERE id = ?", (bike_id,))
+        success = True
+    else:
+        success = False
+        
     conn.commit()
     conn.close()
+    return success
 
 # --- BÖNGÉSZŐ ÉS SCRAPER MÓDOSÍTÁSOK ---
 
@@ -85,62 +88,201 @@ def init_driver():
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+    
+    # Ha a Streamlit Cloudon fut, a rendszerszintű krómot használjuk
+    if os.path.exists("/usr/bin/chromium-browser"):
+        chrome_options.binary_location = "/usr/bin/chromium-browser"
+        try:
+            return webdriver.Chrome(options=chrome_options)
+        except Exception as e:
+            st.error(f"Hiba a felhős böngésző indításakor: {e}")
+            return None
+            
+    # Ha helyi környezetben (pl. VS Code) fut, letöltjük a drivert automatikusan
     try:
         service = Service(ChromeDriverManager().install())
         return webdriver.Chrome(service=service, options=chrome_options)
     except Exception as e:
-        st.error(f"Hiba a böngésző indításakor: {e}")
+        st.error(f"Hiba a helyi böngésző indításakor: {e}")
         return None
 
-def scrape_canyon_all_watched(watched_df):
-    """Végigmegy a listában szereplő összes kerékpáron és összegyűjti a találatokat"""
+def check_and_alert(watched_df):
+    """Csoportosítja a kereséseket az új /search/ alapú linkstruktúrával és a pontos HTML elemzéssel"""
     driver = init_driver()
     if not driver or watched_df.empty:
         if driver: driver.quit()
         return []
     
-    all_results = []
+    email_reports = {}
+    all_live_results = []
     
     for _, row in watched_df.iterrows():
         model = row['model']
         size = row['size']
+        target_email = row['email'].strip().lower()
+        pmin = row['pmin']
+        pmax = row['pmax']
         
-        base_url = "https://www.canyon.com/en-ro/shop/"
-        params = f"?prefn1=pc_rahmengroesse&prefv1={size}&q={model}&searchType=bikes&srule=sort_master_availability_in-stock-prio"
-        full_url = base_url + params
+        # --- DINAMIKUS URL ÖSSZEÁLLÍTÁS AZ ÜRES MEZŐK KEZELÉSÉRE ---
+        base_url = "https://www.canyon.com/en-ro/search/"
+        
+        # Alap paraméterek, amik mindig kellenek
+        url_parts = [
+            f"q={model}",
+            "searchType=bikes",
+            "srule=sort_price_ascending",
+            "start=0",
+            "sz=100"
+        ]
+        
+        # Csak akkor adjuk hozzá a méretet az URL-hez, ha NEM a "Mind" opciót választottad
+        if size and str(size).strip() and str(size).lower() not in ['none', 'mind']:
+            url_parts.append("prefn1=pc_rahmengroesse")
+            url_parts.append(f"prefv1={size}")
+            
+        # Csak akkor adjuk hozzá a minimum árat, ha ki van töltve és nagyobb mint 0
+        if pmin and str(pmin).strip() and str(pmin).lower() != 'none' and float(pmin) > 0:
+            url_parts.append(f"pmin={pmin}")
+        # Ha nincs megadva pmin, vagy 0, axioms nem is küldünk pmin-t az URL-ben, így mindent hoz lentről
+            
+        # Csak akkor adjuk hozzá a maximum árat, ha ki van töltve
+        if pmax and str(pmax).strip() and str(pmax).lower() != 'none':
+            url_parts.append(f"pmax={pmax}")
+            
+        # Összefűzzük a paramétereket egy szép URL-lé
+        full_url = base_url + "?" + "&".join(url_parts)
+
         
         try:
             driver.get(full_url)
-            time.sleep(4)  # Rövid szünet a kérések között, hogy a szerver ne blokkoljon
+            time.sleep(5) # Megvárjuk, amíg a kártyák betöltenek
             
             soup = BeautifulSoup(driver.page_source, 'html.parser')
-            cards = soup.find_all('div', class_='productTileCard') or soup.find_all('li', class_='xlt-searchresultproduct')
+            
+            # Megkeressük az összes új típusú kerékpár kártyát
+            cards = soup.select('div.productTileDefault')
+            
+            bike_list_for_this_row = []
             
             for card in cards:
                 try:
-                    name_el = card.find('div', class_='productTileCard__title') or card.find('a', class_='productTileCard__link')
-                    name = name_el.text.strip() if name_el else "Ismeretlen modell"
+                    # 1. Stratégia: Kiszedjük az adatokat a beágyazott GTM adatokból (ez a legbiztosabb)
+                    gtm_data_str = card.get('data-gtm-impression', '')
+                    name = None
+                    gross_price = None
                     
-                    price_el = card.find('div', class_='productTileCard__priceSale') or card.find('span', class_='price__value')
-                    price = price_el.text.strip() if price_el else "N/A"
+                    if gtm_data_str:
+                        try:
+                            gtm_data = json.loads(gtm_data_str)
+                            # A beküldött HTML-ben két event is van benne, megkeressük az item listát
+                            for item_event in gtm_data:
+                                if 'ecommerce' in item_event and 'items' in item_event['ecommerce']:
+                                    bike_item = item_event['ecommerce']['items'][0]
+                                    name = bike_item.get('item_name')
+                                    gross_price = bike_item.get('gross_price')
+                                    break
+                                elif 'ecommerce' in item_event and 'impressions' in item_event['ecommerce']:
+                                    bike_item = item_event['ecommerce']['impressions'][0]
+                                    name = bike_item.get('name')
+                                    gross_price = bike_item.get('metric4') # metric4 a bruttó ár náluk
+                                    break
+                        except Exception:
+                            pass
                     
-                    link_el = card.find('a', class_='productTileCard__link')
-                    link = "https://www.canyon.com" + link_el['href'] if link_el else full_url
+                    # 2. Stratégia: Ha a JSON valamiért hibát dobna, kiszedjük a link címéből
+                    link_el = card.select_one('a.js-productTileLink')
+                    if not name and link_el:
+                        name = link_el.get('title', '').strip()
+                        
+                    if not name:
+                        continue
+                        
+                    # Szűrés a modell nevére (pl. ultimate)
+                    if model.lower() not in name.lower():
+                        continue
+                        
+                    # Ár formázása
+                    if gross_price:
+                        price = f"{int(gross_price):,} €".replace(',', '.')
+                    else:
+                        # Végső mentőöv, ha nincs meg a JSON-ben az ár, kivadjuk az aria-labelből
+                        aria_label = link_el.get('aria-label', '') if link_el else ''
+                        price_match = re.search(r'Price:\s*([0-9.,\s]+€)', aria_label)
+                        price = price_match.group(1).strip() if price_match else "N/A"
                     
-                    all_results.append({
-                        "Keresett Modell": model.upper(),
-                        "Keresett Méret": size,
-                        "Pontos Megnevezés": name,
+                    # Link összerakása
+                    link = link_el.get('href', full_url) if link_el else full_url
+                    if link.startswith('/'):
+                        link = "https://www.canyon.com" + link
+                        
+                    bike_data = {
+                        "Modell": model.upper(),
+                        "Méret": size,
+                        "Megnevezés": name,
                         "Ár": price,
                         "Link": link
-                    })
-                except:
+                    }
+                    
+                    if bike_data not in bike_list_for_this_row:
+                        bike_list_for_this_row.append(bike_data)
+                        all_live_results.append(bike_data)
+                        
+                except Exception as card_err:
                     continue
+                    
+            if bike_list_for_this_row:
+                if target_email not in email_reports:
+                    email_reports[target_email] = []
+                email_reports[target_email].extend(bike_list_for_this_row)
+                
         except Exception as e:
             st.warning(f"Hiba történt a {model} ({size}) szkennelésekor: {e}")
             
     driver.quit()
-    return all_results
+    
+    # --- AZ ÖSSZESÍTETT LIVE REZULTÁTUMOK RENDEZÉSE ÁR SZERINT NÖVEKVŐBE ---
+    if all_live_results:
+        all_live_results = sorted(
+            all_live_results, 
+            key=lambda x: float(x['Ár'].replace('.', '').replace('€', '').strip()) if '€' in x['Ár'] else 999999
+        )
+    
+    # ÚJ: Kapcsolat felépítése az intelligens állapotellenőrzéshez
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    
+    # E-mailek küldése a csoportosított adatokkal
+    for email, bikes in email_reports.items():
+        # Az adott felhasználó listáját is sorba rendezzük az e-mail kiküldése előtt
+        bikes_sorted = sorted(
+            bikes, 
+            key=lambda x: float(x['Ár'].replace('.', '').replace('€', '').strip()) if '€' in x['Ár'] else 999999
+        )
+        
+        # ÚJ: Egyedi szöveges ujjlenyomat (string) készítése a találati listából
+        current_state_str = json.dumps(bikes_sorted, sort_keys=True)
+        
+        # Megnézzük, mi volt az utolsó elmentett állapot ehhez az e-mailhez
+        cursor.execute("SELECT content_hash FROM last_email_states WHERE email = ?", (email,))
+        db_row = cursor.fetchone()
+        
+        if db_row and db_row[0] == current_state_str:
+            # Ha megegyezik a mostani állapot a legutóbbival, átugorjuk a küldést
+            continue
+            
+        # Ha változás van (vagy még nincs elmentett állapot), elküldjük a levelet
+        res_df = pd.DataFrame(bikes_sorted)
+        if send_email(res_df, email):
+            # Csak a sikeres kiküldés után mentjük el az új hálózati állapotot
+            cursor.execute("""
+                INSERT INTO last_email_states (email, content_hash, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(email) DO UPDATE SET content_hash=excluded.content_hash, updated_at=excluded.updated_at
+            """, (email, current_state_str, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            conn.commit()
+            
+    conn.close()
+    return all_live_results
 
 def send_email(df, recipient_email):
     sender_email = st.secrets["email"]["sender"]
@@ -149,7 +291,7 @@ def send_email(df, recipient_email):
     smtp_port = int(st.secrets["email"]["smtp_port"])
     
     msg = MIMEMultipart('alternative')
-    msg['Subject'] = f"Canyon Készlet Jelentés - {len(df)} találat ({datetime.now().strftime('%H:%M')})"
+    msg['Subject'] = f"Canyon Készlet Jelentés neked! - {len(df)} találat ({datetime.now().strftime('%H:%M')})"
     msg['From'] = sender_email
     msg['To'] = recipient_email
     
@@ -167,11 +309,11 @@ def send_email(df, recipient_email):
         </style>
       </head>
       <body>
-        <h2>Canyon Kerékpár Összefoglaló Jelentés</h2>
-        <p>A rendszer az alábbi elérhető modelleket találta a megadott listád alapján:</p>
+        <h2>Canyon Kerékpár Jelentés a Te megadott ársávod és szűrőid alapján</h2>
+        <p>A rendszer a figyelési listád alapján az alábbi egyezéseket találta:</p>
         {html_table}
         <br>
-        <small>Az ellenőrzés automatikusan futott le.</small>
+        <small>Az ellenőrzés automatikusan futott le a Streamlit Appból.</small>
       </body>
     </html>
     """
@@ -185,96 +327,114 @@ def send_email(df, recipient_email):
         server.quit()
         return True
     except Exception as e:
-        print(f"E-mail hiba: {e}")
+        print(f"E-mail küldési hiba ide: {recipient_email}, hiba: {e}")
         return False
 
 # --- STREAMLIT KIJELZŐ ---
 
 def main():
-    st.set_page_config(page_title="Canyon Multi-Watcher", layout="wide", page_icon="🚲")
+    st.set_page_config(page_title="Canyon Multi-User Watcher", layout="wide", page_icon="🚲")
     init_db()
     
-    st.title("🚲 Canyon.com Készlet Figyelő Központ")
+    st.title("🚲 Canyon.com Készlet Figyelő")
+    st.write("Felvehetitek a saját kereséseiteket egyéni ársávokkal és e-mail címmel.")
     
-    # 1. Beállítások szekció (E-mail)
-    saved_email = get_email_setting()
-    
-    with st.sidebar:
-        st.header("⚙️ Értesítési Beállítások")
-        email_input = st.text_input("Ide küldje a jelentést:", value=saved_email)
-        if st.button("Mentés", use_container_width=True):
-            save_email_setting(email_input)
-            st.success("E-mail cím elmentve!")
-            st.rerun()
-            
-        st.divider()
-        st.markdown("""
-        ### 🔄 Automata Mód
-        A háttérben futó GitHub Action óránként meghívja ezt az appot. Ilyenkor a rendszer végigmegy a jobb oldali listán, és ha van találat, küldi a levelet.
-        """)
+    st.divider()
 
-    # 2. Új kerékpár hozzáadása és meglévő lista megjelenítése
-    col_add, col_list = st.columns([1, 2])
+    # 1. Új kerékpár hozzáadása adatokkal, árszűrővel és e-mail címmel
+    col_add, col_list = st.columns([1.2, 2])
     
     with col_add:
         with st.container(border=True):
-            st.subheader("➕ Új modell figyelése")
-            new_model = st.text_input("Modell neve (pl: ultimate, grizl, spectral)", value="ultimate")
-            new_size = st.selectbox("Méret", options=["3XS", "2XS", "XS", "S", "M", "L", "XL", "2XL"], index=4)
+            st.subheader("➕ Új figyelés hozzáadása")
+            new_model = st.text_input("Modell neve (pl: ultimate, aeroad, endurance)", value="ultimate")
+            new_size = st.selectbox("Méret", options=["Mind", "3XS", "2XS", "XS", "S", "M", "L", "XL", "2XL"], index=0)
             
-            if st.button("Hozzáadás a listához", type="primary", use_container_width=True):
-                add_watched_bike(new_model, new_size)
-                st.toast(f"{new_model.upper()} ({new_size}) hozzáadva!", icon="✅")
-                st.rerun()
+            # ÚJ: Árszűrő beviteli mezők
+            c_pmin, c_pmax = st.columns([1, 1])
+            with c_pmin:
+                price_min = st.number_input("Min ár (€)", value=2000, step=100)
+            with c_pmax:
+                price_max = st.number_input("Max ár (€)", value=5000, step=100)
+                
+            user_email = st.text_input("Értesítendő e-mail cím (A te címed)", value="").strip()
+            
+            if st.button("Hozzáadás a listához", type="primary", width="stretch"):
+                if "@" not in user_email or "." not in user_email:
+                    st.error("Kérlek adj meg egy érvényes e-mail címet!")
+                elif price_min > price_max:
+                    st.error("A minimum ár nem lehet nagyobb a maximum árnál!")
+                else:
+                    add_watched_bike(new_model, new_size, user_email, price_min, price_max)
+                    st.toast(f"{new_model.upper()} ({new_size}) hozzáadva az ársávval!", icon="✅")
+                    st.rerun()
 
     watched_df = get_watched_bikes()
 
+    # 2. Meglévő lista megjelenítése (E-mail nélkül, ársávval, tiszta táblázatként)
     with col_list:
         with st.container(border=True):
-            st.subheader("📋 Jelenleg figyelt kerékpárok listája")
+            st.subheader("📋 Aktuális megosztott figyelési lista")
             if watched_df.empty:
-                st.info("A lista még üres. Adj hozzá egy modellt a bal oldalon!")
+                st.info("A lista még üres. Valaki adjon hozzá egy modellt!")
             else:
-                # Megjelenítünk egy táblázatot törlési opcióval
-                for _, row in watched_df.iterrows():
-                    c1, c2, c3 = st.columns([3, 1, 1])
-                    c1.write(f"**Modell:** {row['model'].upper()}")
-                    c2.write(f"**Méret:** {row['size']}")
-                    if c3.button("❌ Törlés", key=f"del_{row['id']}"):
-                        delete_watched_bike(row['id'])
-                        st.rerun()
+                display_df = watched_df[['id', 'model', 'size', 'pmin', 'pmax']].copy()
+                display_df['model'] = display_df['model'].str.upper()
+                # Formázzuk az árakat szebben a kijelzőre
+                display_df['arsav'] = display_df['pmin'].astype(str) + " € - " + display_df['pmax'].astype(str) + " €"
+                display_df = display_df[['id', 'model', 'size', 'arsav']]
+                display_df.columns = ['ID', 'Modell', 'Méret', 'Figyelt Ársáv']
+                
+                st.dataframe(display_df, width="stretch", hide_index=True)
+                
+                # Törlési szekció hitelesítéssel
+                st.divider()
+                st.markdown("##### 🛠️ Figyelés eltávolítása (Hitelesítéssel)")
+                
+                del_options = {f"ID {row['id']}: {row['model'].upper()} ({row['size']})": row['id'] for _, row in watched_df.iterrows()}
+                
+                c_sel, c_mail = st.columns([1, 1])
+                with c_sel:
+                    selected_to_delete = st.selectbox("Válaszd ki a törölni kívánt elemet:", options=list(del_options.keys()))
+                with c_mail:
+                    delete_email_input = st.text_input("Megerősítéshez írd be a hozzá tartozó e-mail címet:", value="", type="password", key="del_mail").strip()
+                
+                if st.button("🗑️ Figyelés törlése", type="secondary", width="stretch"):
+                    if not delete_email_input:
+                        st.error("A törléshez kötelező megadni a regisztrált e-mail címet!")
+                    else:
+                        bike_id_to_del = del_options[selected_to_delete]
+                        if check_and_delete_bike(bike_id_to_del, delete_email_input):
+                            st.toast("Figyelés sikeresen eltávolítva!", icon="🗑️")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error("Sikertelen törlés! Az e-mail cím nem egyezik az ehhez az ID-hoz elmentett címmel.")
 
     st.divider()
     
     # 3. Manuális indító gomb az oldalon
-    if st.button("🚀 Azonnali ellenőrzés és e-mail küldés (Manuális futtatás)", use_container_width=True):
+    if st.button("🚀 Azonnali ellenőrzés indítása és e-mailek kiküldése", width="stretch"):
         if watched_df.empty:
             st.warning("Nincs mit ellenőrizni, üres a lista!")
             return
             
-        with st.status("Keresés folyamatban a Canyon oldalon...", expanded=True) as status:
-            results = scrape_canyon_all_watched(watched_df)
-            if results:
-                status.update(label="Szkennelés kész!", state="complete")
-                res_df = pd.DataFrame(results)
-                st.dataframe(res_df, use_container_width=True)
-                
-                if send_email(res_df, email_input):
-                    st.success(f"Összefoglaló e-mail elküldve ide: {email_input}")
+        with st.status("Keresés folyamatban a Canyon oldalon az új szűrőkkel...", expanded=True) as status:
+            live_results = check_and_alert(watched_df)
+            
+            if live_results:
+                status.update(label="Szkennelés és hálózati szűrés kész!", state="complete")
+                st.success("Találatok születtek! Az e-mail csak akkor ment ki, ha új bringa érkezett vagy változott az ár.")
+                st.dataframe(pd.DataFrame(live_results), width="stretch")
             else:
-                status.update(label="Kész, de nem találtam semmit készleten.", state="complete")
-                st.info("A figyelt modellek közül jelenleg egyik sincs készleten.")
+                status.update(label="Kész, de a megadott ársávokban jelenleg nincs találat.", state="complete")
+                st.info("A figyelt modellek közül pillanatnyilag egyik sincs készleten a megadott méretekben és ársávban.")
 
     # --- CRON / BACKGROUND TRIGGER AUTOMATIZÁCIÓ ---
-    # Ha a GitHub Action meghívja az appot a háttérben (?run=true paraméterrel)
     if st.query_params.get("run") == "true":
         if not watched_df.empty:
-            results = scrape_canyon_all_watched(watched_df)
-            if results:
-                res_df = pd.DataFrame(results)
-                send_email(res_df, email_input)
-            # Biztosítjuk, hogy a logokban látszódjon a Streamlitnél a lefutás
-            st.write("Háttérben futó ütemezett ellenőrzés sikeresen lezajlott.")
+            check_and_alert(watched_df)
+            st.write("Háttérben futó automatikus csoportos ellenőrzés lezajlott.")
 
 if __name__ == "__main__":
     main()
