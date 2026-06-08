@@ -149,28 +149,27 @@ def check_and_alert(watched_df):
         # --- DINAMIKUS URL ÖSSZEÁLLÍTÁS AZ ÜRES MEZŐK KEZELÉSÉRE ---
         base_url = "https://www.canyon.com/en-ro/search/"
         
-        # Alap paraméterek, amik mindig kellenek
+        # Alap paraméterek (Átírva a pontos Canyon szűrőkre)
         url_parts = [
             f"q={model}",
-            "searchType=bikes",
             "srule=sort_price_ascending",
             "start=0",
-            "sz=100"
+            "sz=100",
+            "prefn1=pc_webCategory",       # 1. Szűrő típusa: Webes kategória
+            "prefv1=Bikes"                 # 1. Szűrő értéke: Kizárólag Kerékpárok (Így nincs alkatrész!)
         ]
         
-        # Csak akkor adjuk hozzá a méretet az URL-hez, ha NEM a "Mind" opciót választottad
+        # Ha a méret is meg van adva, az egy ÚJABB szűrő lesz (prefn2 és prefv2)
         if size and str(size).strip() and str(size).lower() not in ['none', 'mind']:
-            url_parts.append("prefn1=pc_rahmengroesse")
-            url_parts.append(f"prefv1={size}")
+            url_parts.append("prefn2=pc_rahmengroesse")
+            url_parts.append(f"prefv2={size}")
             
-        # Csak akkor adjuk hozzá a minimum árat, ha ki van töltve és nagyobb mint 0
+        # JAVÍTVA: priceMin és priceMax a hivatalos Canyon paraméter név!
         if pmin and str(pmin).strip() and str(pmin).lower() != 'none' and float(pmin) > 0:
-            url_parts.append(f"pmin={pmin}")
-        # Ha nincs megadva pmin, vagy 0, axioms nem is küldünk pmin-t az URL-ben, így mindent hoz lentről
+            url_parts.append(f"priceMin={int(pmin)}")
             
-        # Csak akkor adjuk hozzá a maximum árat, ha ki van töltve
         if pmax and str(pmax).strip() and str(pmax).lower() != 'none':
-            url_parts.append(f"pmax={pmax}")
+            url_parts.append(f"priceMax={int(pmax)}")
             
         # Összefűzzük a paramétereket egy szép URL-lé
         full_url = base_url + "?" + "&".join(url_parts)
