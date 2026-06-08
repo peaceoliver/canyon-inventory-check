@@ -24,11 +24,9 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
-    # HA KORÁBBAN ROSSZUL Regisztrálódott, eldobjuk a táblát, hogy tisztán épüljön újra
-    # Nyugodtan törölhető ez a DROP sor az első sikeres lefutás után!
-    cursor.execute('DROP TABLE IF EXISTS watched_bikes')
+    # KIVETTEM A DROP TABLE-T, hogy ne törölje le a regisztrált bringákat minden oldalfrissítésnél!
     
-    # Új struktúra pmin és pmax értékekkel
+    # Struktúra pmin és pmax értékekkel (csak ha nem létezik)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS watched_bikes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,7 +54,27 @@ def init_db():
 
 def get_watched_bikes():
     conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT id, model, size, email, pmin, pmax FROM watched_bikes", conn)
+    cursor = conn.cursor()
+    
+    # KÉNYSZERÍTETT MEZŐELLENŐRZÉS: Ha a tábla létezik, de hiányzik a pmin/pmax, hozzáadjuk őket menet közben
+    try:
+        cursor.execute("SELECT pmin FROM watched_bikes LIMIT 1")
+    except sqlite3.OperationalError:
+        # Ha hibát dob, az azért van, mert nem léteznek az új oszlopok. Hozzáadjuk őket!
+        try:
+            cursor.execute("ALTER TABLE watched_bikes ADD COLUMN pmin INTEGER DEFAULT 0")
+            cursor.execute("ALTER TABLE watched_bikes ADD COLUMN pmax INTEGER DEFAULT 99999")
+            conn.commit()
+        except Exception:
+            pass # Ha a tábla se létezne, az init_db majd létrehozza
+            
+    # Most már biztonságosan lefuthat a lekérdezés
+    try:
+        df = pd.read_sql_query("SELECT id, model, size, email, pmin, pmax FROM watched_bikes", conn)
+    except Exception:
+        # Végső mentőöv: ha teljesen sérült a tábla, visszaadunk egy üres táblázatot a megfelelő oszlopokkal
+        df = pd.DataFrame(columns=['id', 'model', 'size', 'email', 'pmin', 'pmax'])
+        
     conn.close()
     return df
 
