@@ -196,7 +196,6 @@ def check_and_alert(watched_df):
                     if gtm_data_str:
                         try:
                             gtm_data = json.loads(gtm_data_str)
-                            # A beküldött HTML-ben két event is van benne, megkeressük az item listát
                             for item_event in gtm_data:
                                 if 'ecommerce' in item_event and 'items' in item_event['ecommerce']:
                                     bike_item = item_event['ecommerce']['items'][0]
@@ -222,15 +221,40 @@ def check_and_alert(watched_df):
                     # Szűrés a modell nevére (pl. ultimate)
                     if model.lower() not in name.lower():
                         continue
-                        
-                    # Ár formázása
+                    
+                    # Ár kinyerése és formázása számmá a PYTHON OLDALI SZŰRÉSHEZ
+                    current_price_num = None
                     if gross_price:
-                        price = f"{int(gross_price):,} €".replace(',', '.')
-                    else:
-                        # Végső mentőöv, ha nincs meg a JSON-ben az ár, kivadjuk az aria-labelből
+                        try:
+                            current_price_num = float(gross_price)
+                        except ValueError:
+                            pass
+                    
+                    if current_price_num is None and link_el:
+                        # Végső mentőöv, ha nincs meg a JSON-ben az ár, kivesszük az aria-labelből
                         aria_label = link_el.get('aria-label', '') if link_el else ''
-                        price_match = re.search(r'Price:\s*([0-9.,\s]+€)', aria_label)
-                        price = price_match.group(1).strip() if price_match else "N/A"
+                        price_match = re.search(r'Price:\s*([0-9.,\s]+)', aria_label)
+                        if price_match:
+                            try:
+                                # Kiszedjük a pontokat/vesszőket, hogy tiszta számot kapjunk
+                                clean_p = price_match.group(1).replace('.', '').replace(',', '').strip()
+                                current_price_num = float(clean_p)
+                            except ValueError:
+                                pass
+
+                    # Szigorú Python oldali árszűrés mentőövként:
+                    # Ha sikerült beazonosítani a bringa árát, ellenőrizzük a te általad megadott korlátokat
+                    if current_price_num is not None:
+                        if pmin and current_price_num < float(pmin):
+                            continue  # Túl olcsó (pl. 16 eurós alkatrész), eldobjuk!
+                        if pmax and current_price_num > float(pmax):
+                            continue  # Túl drága, eldobjuk!
+
+                    # Szép formázott szöveges ár a táblázathoz
+                    if current_price_num:
+                        price = f"{int(current_price_num):,} €".replace(',', '.')
+                    else:
+                        price = "N/A"
                     
                     # Link összerakása
                     link = link_el.get('href', full_url) if link_el else full_url
