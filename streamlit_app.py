@@ -498,16 +498,33 @@ def main():
     #cron-job.org
     if st.query_params.get("run") == "true":
 
-        print(f"CRON START - {datetime.now()}")
-        st.write(f"CRON START - {datetime.now()}")
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        print(f"CRON START - {timestamp}")
+        st.write(f"CRON START - {timestamp}")
 
         if not watched_df.empty:
-            check_and_alert(watched_df)
 
-            st.write("Háttérben futó automatikus csoportos ellenőrzés lezajlott.")
+            st.write(
+                f"Figyelések száma: {len(watched_df)} | Futás ideje: {timestamp}"
+            )
 
-        print(f"CRON END - {datetime.now()}")
-        st.write(f"CRON END - {datetime.now()}")
+            check_and_alert(
+                watched_df,
+                force_email=True
+            )
+
+            st.write(
+                f"Háttérben futó automatikus csoportos ellenőrzés lezajlott. ({timestamp})"
+            )
+
+        else:
+            st.write(f"Nincs aktív figyelés. ({timestamp})")
+
+        timestamp_end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        print(f"CRON END - {timestamp_end}")
+        st.write(f"CRON END - {timestamp_end}")
 
 if __name__ == "__main__":
     main()
