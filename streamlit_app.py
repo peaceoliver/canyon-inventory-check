@@ -509,10 +509,7 @@ def main():
                 f"Figyelések száma: {len(watched_df)} | Futás ideje: {timestamp}"
             )
 
-            check_and_alert(
-                watched_df,
-                force_email=True
-            )
+            check_and_alert(watched_df)
 
             st.write(
                 f"Háttérben futó automatikus csoportos ellenőrzés lezajlott. ({timestamp})"
