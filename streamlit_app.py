@@ -4,6 +4,7 @@ import json
 import re
 import sqlite3
 import smtplib
+import requests  # Beemelve a HTTP kérésekhez
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime
@@ -129,8 +130,7 @@ def init_driver():
         st.error(f"Hiba a helyi böngésző indításakor: {e}")
         return None
 
-def check_and_alert(watched_df):
-    """Csoportosítja a kereséseket az új /search/ alapú linkstruktúrával és a pontos HTML elemzéssel"""
+def check_and_alert(watched_df, single_email=None, force_email=False):
     driver = init_driver()
     if not driver or watched_df.empty:
         if driver: driver.quit()
@@ -146,184 +146,150 @@ def check_and_alert(watched_df):
         pmin = row['pmin']
         pmax = row['pmax']
         
-        # --- DINAMIKUS URL ÖSSZEÁLLÍTÁS AZ ÜRES MEZŐK KEZELÉSÉRE ---
-        base_url = "https://www.canyon.com/en-ro/search/"
-        
-        # Alap paraméterek (Átírva a pontos Canyon szűrőkre)
-        url_parts = [
-            f"q={model}",
-            "srule=sort_price_ascending",
-            "start=0",
-            "sz=100",
-            "prefn1=pc_webCategory",       # 1. Szűrő típusa: Webes kategória
-            "prefv1=Bikes"                 # 1. Szűrő értéke: Kizárólag Kerékpárok (Így nincs alkatrész!)
-        ]
-        
-        # Ha a méret is meg van adva, az egy ÚJABB szűrő lesz (prefn2 és prefv2)
-        if size and str(size).strip() and str(size).lower() not in ['none', 'mind']:
-            url_parts.append("prefn2=pc_rahmengroesse")
-            url_parts.append(f"prefv2={size}")
-            
-        # JAVÍTVA: priceMin és priceMax a hivatalos Canyon paraméter név!
-        if pmin and str(pmin).strip() and str(pmin).lower() != 'none' and float(pmin) > 0:
-            url_parts.append(f"priceMin={int(pmin)}")
-            
-        if pmax and str(pmax).strip() and str(pmax).lower() != 'none':
-            url_parts.append(f"priceMax={int(pmax)}")
-            
-        # Összefűzzük a paramétereket egy szép URL-lé
-        full_url = base_url + "?" + "&".join(url_parts)
+        # A keresési URL
+        base_url = (
+            f"https://www.canyon.com/en-ro/search/"
+            f"?q={model.lower()}"
+            f"&searchType=bikes"
+            f"&srule=sort_master_availability_in-stock-prio"
+            f"&pmin={pmin}"
+            f"&pmax={pmax}"
+        )
+        if size and size.lower() != 'mind':
+            base_url += f"&prefn1=pc_rahmengroesse&prefv1={size.upper()}"
 
-        
+        if single_email and target_email != single_email.strip().lower():
+            continue
+            
         try:
-            driver.get(full_url)
-            time.sleep(5) # Megvárjuk, amíg a kártyák betöltenek
+            # TELJES BÖNGÉSZŐ ALAPÚ BETÖLTÉS (ez betölti a JS-t is)
+            driver.get(base_url)
+            time.sleep(8) # Többet várunk, hogy a JS biztosan lefusson
             
+            # BeautifulSoup a böngésző aktuális kódján
             soup = BeautifulSoup(driver.page_source, 'html.parser')
+            cards = soup.select('.productTileDefault, .productTile')
             
-            # Megkeressük az összes új típusú kerékpár kártyát
-            cards = soup.select('div.productTileDefault')
-            
-            bike_list_for_this_row = []
+            print(f"[DEBUG] {model.upper()} keresése: {len(cards)} találat.")
             
             for card in cards:
-                try:
-                    # 1. Stratégia: Kiszedjük az adatokat a beágyazott GTM adatokból (ez a legbiztosabb)
-                    gtm_data_str = card.get('data-gtm-impression', '')
-                    name = None
-                    gross_price = None
-                    
-                    if gtm_data_str:
-                        try:
-                            gtm_data = json.loads(gtm_data_str)
-                            for item_event in gtm_data:
-                                if 'ecommerce' in item_event and 'items' in item_event['ecommerce']:
-                                    bike_item = item_event['ecommerce']['items'][0]
-                                    name = bike_item.get('item_name')
-                                    gross_price = bike_item.get('gross_price')
-                                    break
-                                elif 'ecommerce' in item_event and 'impressions' in item_event['ecommerce']:
-                                    bike_item = item_event['ecommerce']['impressions'][0]
-                                    name = bike_item.get('name')
-                                    gross_price = bike_item.get('metric4') # metric4 a bruttó ár náluk
-                                    break
-                        except Exception:
-                            pass
-                    
-                    # 2. Stratégia: Ha a JSON valamiért hibát dobna, kiszedjük a link címéből
-                    link_el = card.select_one('a.js-productTileLink')
-                    if not name and link_el:
-                        name = link_el.get('title', '').strip()
-                        
-                    if not name:
-                        continue
-                        
-                    # Szűrés a modell nevére (pl. ultimate)
-                    if model.lower() not in name.lower():
-                        continue
-                    
-                    # Ár kinyerése és formázása számmá a PYTHON OLDALI SZŰRÉSHEZ
-                    current_price_num = None
-                    if gross_price:
-                        try:
-                            current_price_num = float(gross_price)
-                        except ValueError:
-                            pass
-                    
-                    if current_price_num is None and link_el:
-                        # Végső mentőöv, ha nincs meg a JSON-ben az ár, kivesszük az aria-labelből
-                        aria_label = link_el.get('aria-label', '') if link_el else ''
-                        
-                        # JAVÍTOTT REGEX: Bármilyen szövegkörnyezetből kiszedi a számokat, amik az € jel előtt vannak
-                        price_match = re.search(r'([0-9.,\s]+)\s*€', aria_label)
-                        if price_match:
-                            try:
-                                # Tisztítjuk a karaktereket (szóközök, pontok eltávolítása a float-hoz)
-                                clean_p = price_match.group(1).replace('.', '').replace(',', '').replace('\xa0', '').strip()
-                                # Ha a Canyon esetleg tizedesjegyet is küld a végén (pl. .00 vagy ,00), azt levágjuk
-                                if len(clean_p) > 2 and (clean_p[-2:] == "00"):
-                                    clean_p = clean_p[:-2]
-                                current_price_num = float(clean_p)
-                            except ValueError:
-                                pass
-
-                    # Szigorú Python oldali árszűrés mentőövként:
-                    if current_price_num is not None:
-                        if pmin and current_price_num < float(pmin):
-                            continue  # Túl olcsó (alkatrész), eldobjuk!
-                        if pmax and current_price_num > float(pmax):
-                            continue  # Túl drága, eldobjuk!
-
-                    # Szép formázott szöveges ár a táblázathoz
-                    if current_price_num:
-                        price = f"{int(current_price_num):,} €".replace(',', '.')
-                    else:
-                        price = "N/A"
-                    
-                    # Link összerakása
-                    link = link_el.get('href', full_url) if link_el else full_url
-                    if link.startswith('/'):
-                        link = "https://www.canyon.com" + link
-                        
-                    bike_data = {
-                        "Modell": model.upper(),
-                        "Méret": size,
-                        "Megnevezés": name,
-                        "Ár": price,
-                        "Link": link
-                    }
-                    
-                    if bike_data not in bike_list_for_this_row:
-                        bike_list_for_this_row.append(bike_data)
-                        all_live_results.append(bike_data)
-                        
-                except Exception as card_err:
-                    continue
-                    
-            if bike_list_for_this_row:
-                if target_email not in email_reports:
-                    email_reports[target_email] = []
-                email_reports[target_email].extend(bike_list_for_this_row)
+                # Név kinyerése
+                name_el = card.select_one('.productTileDefault__productName, .productTile__name')
+                bike_name = name_el.text.strip() if name_el else ""
                 
+                if model.lower() not in bike_name.lower():
+                    continue
+
+                sale_price = ""
+                original_price = ""
+                discount_text = ""
+                save_amount = ""
+                availability_text = ""
+
+                sale_el = card.select_one('.productTileDefault__priceSale, .productTile__priceSale')
+                if sale_el:
+                    sale_price = sale_el.get_text(" ", strip=True)
+
+                orig_el = card.select_one('.productTileDefault__priceOriginal, .productTile__priceOriginal')
+                if orig_el:
+                    original_price = orig_el.get_text(" ", strip=True)
+
+                save_el = card.select_one('.productTileDefault__priceSave, .productTile__priceSave')
+                if save_el:
+                    save_amount = save_el.get_text(" ", strip=True)
+
+                promo_el = card.select_one('.promotionCalloutInclude')
+                if promo_el:
+                    discount_text = promo_el.get_text(" ", strip=True)
+
+                availability_el = card.select_one('.productBadge__text')
+                if availability_el:
+                    availability_text = availability_el.get_text(" ", strip=True)
+
+                price_text = sale_price
+                if not price_text:
+                    price_el = card.select_one('.productTileDefault__price, .productTile__price')
+                    if price_el:
+                        price_text = price_el.get_text(" ", strip=True)
+                
+                # Ár tisztítás (pontok eltávolítása, számkonverzió)
+                clean_price = ''.join(filter(str.isdigit, price_text.split('€')[0].split(',')[0]))
+                current_price_num = int(clean_price) if clean_price else 0
+                
+                print(f"[DEBUG] Talált: {bike_name} | Ár: {current_price_num} €")
+
+                # Árszűrő
+                if pmin <= current_price_num <= pmax:
+                    link_el = card.select_one('a')
+                    link = "https://www.canyon.com" + link_el.get('href') if link_el else base_url
+                    
+                    coupon_price = ""
+                    m = re.search(r'(\d+)\s*%', discount_text)
+                    if m:
+                        try:
+                            percent = int(m.group(1))
+                            coupon_price = f"{round(current_price_num * (100 - percent) / 100)} €"
+                        except Exception:
+                            coupon_price = ""
+
+                    bike_data = {
+                        "Modell": f"🔥 {bike_name}" if (discount_text or original_price or save_amount) else bike_name,
+                        "Ár": f"{current_price_num} €",
+                        "Kuponos ár": coupon_price,
+                        "Eredeti ár": original_price,
+                        "Megtakarítás": save_amount,
+                        "Kedvezmény": discount_text,
+                        "Elérhetőség": availability_text,
+                        "Link": f'<a href="{link}" target="_blank">Megnyitás</a>'
+                    }
+                    all_live_results.append(bike_data)
+
+                    if target_email not in email_reports:
+                        email_reports[target_email] = []
+
+                    email_reports[target_email].append(bike_data)
+                    
         except Exception as e:
-            st.warning(f"Hiba történt a {model} ({size}) szkennelésekor: {e}")
+            print(f"Hiba a betöltésnél: {e}")
             
     driver.quit()
+
     
-    # --- AZ ÖSSZESÍTETT LIVE REZULTÁTUMOK RENDEZÉSE ÁR SZERINT NÖVEKVŐBE ---
+    # Az összesített live eredmények rendezése ár szerint
     if all_live_results:
         all_live_results = sorted(
             all_live_results, 
             key=lambda x: float(x['Ár'].replace('.', '').replace('€', '').strip()) if '€' in x['Ár'] else 999999
         )
     
-    # ÚJ: Kapcsolat felépítése az intelligens állapotellenőrzéshez
+    # Kapcsolat felépítése az adatbázissal az állapotok kezeléséhez
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     
     # E-mailek küldése a csoportosított adatokkal
     for email, bikes in email_reports.items():
-        # Az adott felhasználó listáját is sorba rendezzük az e-mail kiküldése előtt
         bikes_sorted = sorted(
             bikes, 
             key=lambda x: float(x['Ár'].replace('.', '').replace('€', '').strip()) if '€' in x['Ár'] else 999999
         )
         
-        # ÚJ: Egyedi szöveges ujjlenyomat (string) készítése a találati listából
+        # Egyedi szöveges ujjlenyomat készítése a találati listából
         current_state_str = json.dumps(bikes_sorted, sort_keys=True)
         
-        # Megnézzük, mi volt az utolsó elmentett állapot ehhez az e-mailhez
+        # Megnézzük, mi volt az utolsó elmentett állapot
         cursor.execute("SELECT content_hash FROM last_email_states WHERE email = ?", (email,))
         db_row = cursor.fetchone()
         
-        if db_row and db_row[0] == current_state_str:
-            # Ha megegyezik a mostani állapot a legutóbbival, átugorjuk a küldést
-            continue
-            
-        # Ha változás van (vagy még nincs elmentett állapot), elküldjük a levelet
+        # MODOSÍTVA: Ha force_email=True (manuális indítás), akkor NEM ugorjuk át a küldést egyezés esetén sem!
+        if not force_email:
+            if db_row and db_row[0] == current_state_str:
+                # Automata módban, ha megegyezik a struktúra, átugorjuk a kiküldést
+                continue
+                
+        # Ha változás van VAGY ha kényszerítettük a küldést (force_email=True)
         res_df = pd.DataFrame(bikes_sorted)
         if send_email(res_df, email):
-            # Csak a sikeres kiküldés után mentjük el az új hálózati állapotot
+            # Frissítjük az adatbázisban az állapotot, hogy a cron-job tudja, mi a legfrissebb kiküldött állapot
             cursor.execute("""
                 INSERT INTO last_email_states (email, content_hash, updated_at)
                 VALUES (?, ?, ?)
@@ -463,22 +429,38 @@ def main():
 
     st.divider()
     
-    # 3. Manuális indító gomb az oldalon
-    if st.button("🚀 Azonnali ellenőrzés indítása és e-mailek kiküldése", width="stretch"):
-        if watched_df.empty:
-            st.warning("Nincs mit ellenőrizni, üres a lista!")
-            return
+    # 3. ÚJ: Manuális indító gomb e-mail hitelesítéssel
+    st.markdown("##### 🚀 Azonnali ellenőrzés indítása (Saját szűrés)")
+    
+    c_btn_mail, c_btn_exec = st.columns([1, 1])
+    with c_btn_mail:
+        manual_email_input = st.text_input("Írd be az e-mail címed az indításhoz:", value="", key="manual_exec_mail").strip()
+    with c_btn_exec:
+        st.write("") # Kis helyköz, hogy a gomb egy vonalban legyen a beviteli mezővel
+        st.write("")
+        trigger_button = st.button("Ellenőrzés indítása", type="primary", width="stretch")
+
+    if trigger_button:
+        if not manual_email_input or "@" not in manual_email_input:
+            st.error("Kérlek, adj meg egy érvényes e-mail címet az ellenőrzés futtatásához!")
+        else:
+            # Megnézzük, hogy egyáltalán van-e bringa regisztrálva ehhez az e-mailhez
+            user_specific_df = watched_df[watched_df['email'].str.strip().str.lower() == manual_email_input.lower()]
             
-        with st.status("Keresés folyamatban a Canyon oldalon az új szűrőkkel...", expanded=True) as status:
-            live_results = check_and_alert(watched_df)
-            
-            if live_results:
-                status.update(label="Szkennelés és hálózati szűrés kész!", state="complete")
-                st.success("Találatok születtek! Az e-mail csak akkor ment ki, ha új bringa érkezett vagy változott az ár.")
-                st.dataframe(pd.DataFrame(live_results), width="stretch")
+            if user_specific_df.empty:
+                st.warning("Ezzel az e-mail címmel jelenleg nincs egyetlen aktív figyelés sem a fenti listában!")
             else:
-                status.update(label="Kész, de a megadott ársávokban jelenleg nincs találat.", state="complete")
-                st.info("A figyelt modellek közül pillanatnyilag egyik sincs készleten a megadott méretekben és ársávban.")
+                with st.status(f"Keresés folyamatban a Canyon oldalon a(z) {manual_email_input} figyeléseihez...", expanded=True) as status:
+                    # JAVÍTVA: Átadjuk a force_email=True értéket, így mindig kiküldi a levelet!
+                    live_results = check_and_alert(watched_df, single_email=manual_email_input, force_email=True)
+                    
+                    if live_results:
+                        status.update(label="Szkennelés kész!", state="complete")
+                        st.success("Találatok születtek! Az e-mailt sikeresen kiküldtük a postaládádba az aktuális listával.")
+                        st.dataframe(pd.DataFrame(live_results), width="stretch")
+                    else:
+                        status.update(label="Kész. Jelenleg nincs találat a te ársávodban.", state="complete")
+                        st.info("A figyelt modelljeid közül pillanatnyilag egyik sincs készleten. (Mivel nincs találat, e-mail nem ment ki).")
 
     # --- CRON / BACKGROUND TRIGGER AUTOMATIZÁCIÓ ---
     #cron-job.org
