@@ -221,7 +221,16 @@ def check_and_alert(watched_df, single_email=None, force_email=False):
                 # Árszűrő
                 if pmin <= current_price_num <= pmax:
                     link_el = card.select_one('a')
-                    link = "https://www.canyon.com" + link_el.get('href') if link_el else base_url
+
+                    if link_el:
+                        href = link_el.get('href', '')
+
+                        if href.startswith('http'):
+                            link = href
+                        else:
+                            link = "https://www.canyon.com" + href
+                    else:
+                        link = base_url
                     
                     coupon_price = ""
                     m = re.search(r'(\d+)\s*%', discount_text)
@@ -465,9 +474,14 @@ def main():
     # --- CRON / BACKGROUND TRIGGER AUTOMATIZÁCIÓ ---
     #cron-job.org
     if st.query_params.get("run") == "true":
+        
+        st.write("CRON START")
+        
         if not watched_df.empty:
             check_and_alert(watched_df)
             st.write("Háttérben futó automatikus csoportos ellenőrzés lezajlott.")
+        
+        st.write("CRON END")
 
 if __name__ == "__main__":
     main()
