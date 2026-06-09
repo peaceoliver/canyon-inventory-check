@@ -12,4 +12,6 @@ jobs:
     steps:
       - name: Call Streamlit App
         run: |
-          curl -L "https://canyon.streamlit.app/?run=true"
+          curl -L \
+            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36" \
+            "https://canyon.streamlit.app/?run=true"
