@@ -90,15 +90,37 @@ def add_watched_bike(model, size, email, pmin, pmax):
 def check_and_delete_bike(bike_id, email):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT id FROM watched_bikes WHERE id = ? AND email = ?", (bike_id, email.strip().lower()))
+
+    email_clean = email.strip().lower()
+
+    cursor.execute(
+        "SELECT id FROM watched_bikes WHERE id = ? AND email = ?",
+        (bike_id, email_clean)
+    )
     row = cursor.fetchone()
-    
+
     if row:
-        cursor.execute("DELETE FROM watched_bikes WHERE id = ?", (bike_id,))
+        cursor.execute(
+            "DELETE FROM watched_bikes WHERE id = ?",
+            (bike_id,)
+        )
+
+        cursor.execute(
+            "SELECT COUNT(*) FROM watched_bikes WHERE email = ?",
+            (email_clean,)
+        )
+        remaining = cursor.fetchone()[0]
+
+        if remaining == 0:
+            cursor.execute(
+                "DELETE FROM last_email_states WHERE email = ?",
+                (email_clean,)
+            )
+
         success = True
     else:
         success = False
-        
+
     conn.commit()
     conn.close()
     return success
