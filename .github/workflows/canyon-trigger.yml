@@ -10,11 +10,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Call Streamlit App
+      - name: Install Playwright
         run: |
-          curl -L \
-            --max-redirs 10 \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36" \
-            -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
-            -H "Accept-Language: en-US,en;q=0.9" \
-            "https://canyon.streamlit.app/?run=true"
+          npm init -y
+          npm install playwright
+          npx playwright install chromium
+
+      - name: Open Streamlit URL
+        run: |
+          node -e "
+          const { chromium } = require('playwright');
+          (async () => {
+            const browser = await chromium.launch({ headless: true });
+            const page = await browser.newPage();
+            await page.goto('https://canyon.streamlit.app/?run=true', {
+              waitUntil: 'networkidle',
+              timeout: 120000
+            });
+            console.log(await page.title());
+            console.log(await page.textContent('body'));
+            await browser.close();
+          })();
+          "
