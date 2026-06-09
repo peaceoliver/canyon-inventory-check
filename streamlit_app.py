@@ -1,5 +1,6 @@
 import os
 import time
+from datetime import datetime
 import json
 import re
 import sqlite3
@@ -496,14 +497,17 @@ def main():
     # --- CRON / BACKGROUND TRIGGER AUTOMATIZÁCIÓ ---
     #cron-job.org
     if st.query_params.get("run") == "true":
-        
-        st.write("CRON START")
-        
+
+        print(f"CRON START - {datetime.now()}")
+        st.write(f"CRON START - {datetime.now()}")
+
         if not watched_df.empty:
             check_and_alert(watched_df)
+
             st.write("Háttérben futó automatikus csoportos ellenőrzés lezajlott.")
-        
-        st.write("CRON END")
+
+        print(f"CRON END - {datetime.now()}")
+        st.write(f"CRON END - {datetime.now()}")
 
 if __name__ == "__main__":
     main()
