@@ -163,6 +163,28 @@ def check_and_delete_bike(bike_id, email):
     conn.close()
     return success
 
+def mask_email(email):
+    try:
+        local, domain = email.split("@", 1)
+        domain_name, domain_ext = domain.rsplit(".", 1)
+
+        if len(local) <= 2:
+            masked_local = local[0] + "*"
+        else:
+            masked_local = local[0] + "*" * max(3, len(local) - 2) + local[-1]
+
+        if len(domain_name) <= 2:
+            masked_domain = domain_name[0] + "*"
+        else:
+            masked_domain = domain_name[0] + "*" * max(3, len(domain_name) - 2) + domain_name[-1]
+
+        return f"{masked_local}@{masked_domain}.{domain_ext}"
+
+    except Exception:
+        return "***"
+
+
+
 # --- BÖNGÉSZŐ ÉS SCRAPER MÓDOSÍTÁSOK ---
 
 def init_driver():
@@ -494,14 +516,17 @@ def main():
             if watched_df.empty:
                 st.info("A lista még üres. Valaki adjon hozzá egy modellt!")
             else:
-                display_df = watched_df[['id', 'model', 'size', 'pmin', 'pmax']].copy()
+                display_df = watched_df[['id', 'model', 'size', 'pmin', 'pmax', 'email']].copy()
                 display_df['model'] = display_df['model'].str.upper()
+
                 # Formázzuk az árakat szebben a kijelzőre
                 display_df['arsav'] = display_df['pmin'].astype(str) + " € - " + display_df['pmax'].astype(str) + " €"
-                display_df = display_df[['id', 'model', 'size', 'arsav']]
-                display_df.columns = ['ID', 'Modell', 'Méret', 'Figyelt Ársáv']
-                
-                st.dataframe(display_df, width="stretch", hide_index=True)
+
+                # E-mail cím maszkolása
+                display_df['masked_email'] = display_df['email'].apply(mask_email)
+
+                display_df = display_df[['id', 'model', 'size', 'arsav', 'masked_email']]
+                display_df.columns = ['ID', 'Modell', 'Méret', 'Figyelt Ársáv', 'E-mail']
                 
                 # Törlési szekció hitelesítéssel
                 st.divider()
