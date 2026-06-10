@@ -32,11 +32,13 @@ def get_db_connection():
         connection_string = st.secrets["sqlitecloud"]["connection_string"]
 
         if connection_string and sqlitecloud:
+            print("DB: SQLite Cloud")
             return sqlitecloud.connect(connection_string)
 
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"SQLite Cloud hiba: {e}")
 
+    print("DB: Local SQLite")
     return sqlite3.connect(DB_FILE)
 
 def init_db():
@@ -75,26 +77,43 @@ def init_db():
 def get_watched_bikes():
     conn = get_db_connection()
     cursor = conn.cursor()
-    
-    # KÉNYSZERÍTETT MEZŐELLENŐRZÉS: Ha a tábla létezik, de hiányzik a pmin/pmax, hozzáadjuk őket menet közben
+
     try:
         cursor.execute("SELECT pmin FROM watched_bikes LIMIT 1")
-    except sqlite3.OperationalError:
-        # Ha hibát dob, az azért van, mert nem léteznek az új oszlopok. Hozzáadjuk őket!
+    except Exception:
         try:
             cursor.execute("ALTER TABLE watched_bikes ADD COLUMN pmin INTEGER DEFAULT 0")
             cursor.execute("ALTER TABLE watched_bikes ADD COLUMN pmax INTEGER DEFAULT 99999")
             conn.commit()
         except Exception:
-            pass # Ha a tábla se létezne, az init_db majd létrehozza
-            
-    # Most már biztonságosan lefuthat a lekérdezés
+            pass
+
     try:
-        df = pd.read_sql_query("SELECT id, model, size, email, pmin, pmax FROM watched_bikes", conn)
-    except Exception:
-        # Végső mentőöv: ha teljesen sérült a tábla, visszaadunk egy üres táblázatot a megfelelő oszlopokkal
+        cursor.execute("SELECT id, model, size, email, pmin, pmax FROM watched_bikes")
+        rows = cursor.fetchall()
+
+        normalized_rows = []
+
+        for row in rows:
+            normalized_rows.append({
+                "id": row[0],
+                "model": row[1],
+                "size": row[2],
+                "email": row[3],
+                "pmin": row[4],
+                "pmax": row[5],
+            })
+
+        df = pd.DataFrame(
+            normalized_rows,
+            columns=["id", "model", "size", "email", "pmin", "pmax"]
+        )
+
+
+    except Exception as e:
+        print(f"DB olvasási hiba: {e}")
         df = pd.DataFrame(columns=['id', 'model', 'size', 'email', 'pmin', 'pmax'])
-        
+
     conn.close()
     return df
 
