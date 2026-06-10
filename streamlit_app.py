@@ -18,12 +18,30 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 
+try:
+    import sqlitecloud
+except ImportError:
+    sqlitecloud = None
+
 # --- ADATBÁZIS KEZELÉS (SQLite) ---
 DB_FILE = "canyon_watcher.db"
 
+def get_db_connection():
+
+    try:
+        connection_string = st.secrets["sqlitecloud"]["connection_string"]
+
+        if connection_string and sqlitecloud:
+            return sqlitecloud.connect(connection_string)
+
+    except Exception:
+        pass
+
+    return sqlite3.connect(DB_FILE)
+
 def init_db():
     """Létrehozza a keresési feltételek és az utolsó kiküldött állapotok tábláit."""
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
     # KIVETTEM A DROP TABLE-T, hogy ne törölje le a regisztrált bringákat minden oldalfrissítésnél!
@@ -55,7 +73,7 @@ def init_db():
 
 
 def get_watched_bikes():
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
     # KÉNYSZERÍTETT MEZŐELLENŐRZÉS: Ha a tábla létezik, de hiányzik a pmin/pmax, hozzáadjuk őket menet közben
@@ -81,7 +99,7 @@ def get_watched_bikes():
     return df
 
 def add_watched_bike(model, size, email, pmin, pmax):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("INSERT INTO watched_bikes (model, size, email, pmin, pmax, added_at) VALUES (?, ?, ?, ?, ?, ?)", 
                    (model.strip().lower(), size, email.strip().lower(), int(pmin), int(pmax), datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
@@ -89,7 +107,7 @@ def add_watched_bike(model, size, email, pmin, pmax):
     conn.close()
 
 def check_and_delete_bike(bike_id, email):
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
     email_clean = email.strip().lower()
@@ -295,7 +313,7 @@ def check_and_alert(watched_df, single_email=None, force_email=False):
         )
     
     # Kapcsolat felépítése az adatbázissal az állapotok kezeléséhez
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
     # E-mailek küldése a csoportosított adatokkal
