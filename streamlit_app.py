@@ -369,7 +369,7 @@ def check_and_alert(watched_df, single_email=None, force_email=False):
     conn.close()
     return all_live_results
 
-def send_email(df, recipient_email):
+def send_email(df, recipient_email, run_type="automatic"):
     sender_email = st.secrets["email"]["sender"]
     sender_password = st.secrets["email"]["password"]
     smtp_server = st.secrets["email"]["smtp_server"]
@@ -409,8 +409,39 @@ def send_email(df, recipient_email):
         server.starttls()
         server.login(sender_email, sender_password)
         server.sendmail(sender_email, recipient_email, msg.as_string())
+
+        # EMAIL LOG
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                INSERT INTO email_logs
+                (
+                    email,
+                    run_type,
+                    sent_at,
+                    result_count,
+                    success
+                )
+                VALUES (?, ?, ?, ?, ?)
+            """, (
+                recipient_email,
+                run_type,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                len(df),
+                1
+            ))
+
+            conn.commit()
+            conn.close()
+
+        except Exception as log_error:
+            print(f"Email log hiba: {log_error}")
+
         server.quit()
         return True
+
     except Exception as e:
         print(f"E-mail küldési hiba ide: {recipient_email}, hiba: {e}")
         return False
