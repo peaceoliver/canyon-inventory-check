@@ -527,6 +527,8 @@ def main():
 
                 display_df = display_df[['id', 'model', 'size', 'arsav', 'masked_email']]
                 display_df.columns = ['ID', 'Modell', 'Méret', 'Figyelt Ársáv', 'E-mail']
+
+                st.dataframe(display_df, width="stretch", hide_index=True)
                 
                 # Törlési szekció hitelesítéssel
                 st.divider()
