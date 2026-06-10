@@ -437,6 +437,19 @@ def send_email(df, recipient_email, run_type="automatic"):
             conn = get_db_connection()
             cursor = conn.cursor()
 
+            models = ",".join(sorted(df["Modell"].astype(str).unique()))
+
+            price_ranges = "; ".join(
+                sorted(
+                    set(
+                        df.apply(
+                            lambda row: f"{row['Modell']}({row['Méret']}):{row['Figyelt Min Ár']}-{row['Figyelt Max Ár']}",
+                            axis=1
+                        )
+                    )
+                )
+            )
+
             cursor.execute("""
                 INSERT INTO email_logs
                 (
@@ -444,14 +457,18 @@ def send_email(df, recipient_email, run_type="automatic"):
                     run_type,
                     sent_at,
                     result_count,
+                    models,
+                    price_ranges,
                     success
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 recipient_email,
                 run_type,
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 len(df),
+                models,
+                price_ranges,
                 1
             ))
 
