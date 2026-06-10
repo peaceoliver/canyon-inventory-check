@@ -361,7 +361,7 @@ def send_email(df, recipient_email):
         <p>A rendszer a figyelési listád alapján az alábbi egyezéseket találta:</p>
         {html_table}
         <br>
-        <small>Az ellenőrzés automatikusan futott le a Streamlit Appból.</small>
+        <small>Canyon figyelő rendszer - ellenőrzés ideje: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</small>
       </body>
     </html>
     """
