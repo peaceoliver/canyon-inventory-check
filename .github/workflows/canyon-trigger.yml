@@ -24,9 +24,11 @@ jobs:
             const browser = await chromium.launch({ headless: true });
             const page = await browser.newPage();
             await page.goto('https://canyon.streamlit.app/?run=true', {
-              waitUntil: 'networkidle',
-              timeout: 120000
+              waitUntil: 'load',
+              timeout: 60000
             });
+            // Wait for the main Streamlit container to appear
+            await page.waitForSelector('.stApp');
             console.log(await page.title());
             console.log(await page.textContent('body'));
             await browser.close();
