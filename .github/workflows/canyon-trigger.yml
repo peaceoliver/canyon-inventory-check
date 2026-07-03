@@ -3,7 +3,7 @@ name: Canyon Inventory Trigger
 on:
   schedule:
     - cron: '0 * * * *'  # Minden óra 0. percében lefut
-  workflow_dispatch:     # Ezzel kapsz egy manuális "Run workflow" gombot is a GitHubon
+  workflow_dispatch:     # Manuális indítás gomb
 
 jobs:
   trigger:
@@ -25,27 +25,34 @@ jobs:
           node -e "
           const playwright = require('playwright');
           (async () => {
-            const browser = await playwright.chromium.launch();
-            const page = await browser.newPage();
-            
-            console.log('Navigálás a Streamlit appra...');
-            await page.goto('https://canyon.streamlit.app/?run=true', { waitUntil: 'domcontentloaded' });
-            
             try {
-              // Megkeressük a Streamlit alvó gombját, ha elaludt volna az app
+              const browser = await playwright.chromium.launch();
+              const page = await browser.newPage();
+              
+              console.log('1. LÉPÉS: Navigálás a https://canyon.streamlit.app/?run=true címre...');
+              await page.goto('https://canyon.streamlit.app/?run=true', { waitUntil: 'load', timeout: 60000 });
+              
+              console.log('2. LÉPÉS: Ellenőrizzük, hogy alszik-e az alkalmazás...');
               const wakeUpButton = page.getByRole('button', { name: 'Wake up app' });
+              
               if (await wakeUpButton.isVisible({ timeout: 5000 })) {
-                console.log('Az app alszik! Ébresztő gomb megnyomása...');
+                console.log('-> Az app alszik! Kattintás a \"Wake up app\" gombra...');
                 await wakeUpButton.click();
+                console.log('-> Gomb megnyomva. Várunk 20 másodpercet, amíg a szerver felébred...');
+                await page.waitForTimeout(20000);
+              } else {
+                console.log('-> Az app nem alszik, aktív.');
               }
-            } catch (e) {
-              console.log('Az app nem aludt, vagy nem volt szükség ébresztésre.');
-            }
 
-            console.log('Várakozás az app betöltésére...');
-            await page.waitForSelector('.stApp', { timeout: 90000 });
-            
-            console.log('Sikeresen lefutott a trigger!');
-            await browser.close();
+              console.log('3. LÉPÉS: Várakozás a Streamlit (.stApp) felület betöltődésére...');
+              await page.waitForSelector('.stApp', { timeout: 60000 });
+              
+              console.log('4. LÉPÉS: SIKER! Az oldal sikeresen betöltött, a trigger lefutott.');
+              await browser.close();
+              
+            } catch (error) {
+              console.error('❌ KRITIKUS HIBA A FUTÁS SORÁN:', error.message);
+              process.exit(1);
+            }
           })();
           "
