@@ -17,8 +17,10 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install Playwright
-        run: npm install playwright
+      - name: Install Playwright and Browsers
+        run: |
+          npm install playwright
+          npx playwright install chromium
 
       - name: Trigger Streamlit App
         run: |
