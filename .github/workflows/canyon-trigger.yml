@@ -1,4 +1,26 @@
-- name: Trigger Streamlit App
+name: Canyon Inventory Trigger
+
+on:
+  schedule:
+    - cron: '0 * * * *'  # Minden óra 0. percében lefut (módosíthatod igény szerint)
+  workflow_dispatch:     # Ezzel kapsz egy manuális "Run workflow" gombot is a GitHubon
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install Playwright
+        run: npm install playwright
+
+      - name: Trigger Streamlit App
         run: |
           node -e "
           const playwright = require('playwright');
@@ -7,21 +29,20 @@
             const page = await browser.newPage();
             
             console.log('Navigálás a Streamlit appra...');
-            // Cseréld ki a lenti URL-t a saját Streamlit appod URL-jére!
+            // CSERÉLD KI az alábbi URL-t a te pontos Streamlit appod címére, ha eltér!
             await page.goto('https://canyon-inventory-check.streamlit.app/?run=true', { waitUntil: 'domcontentloaded' });
             
-            // Megnézzük, hogy alszik-e az app. Ha igen, megnyomjuk az ébresztő gombot.
             try {
-              const wakeUpButton = page.locator('button:has-text(\"Wake up app\")');
+              // Megkeressük a Streamlit alvó gombját, ha elaludt volna az app
+              const wakeUpButton = page.getByRole('button', { name: 'Wake up app' });
               if (await wakeUpButton.isVisible({ timeout: 5000 })) {
                 console.log('Az app alszik! Ébresztő gomb megnyomása...');
                 await wakeUpButton.click();
               }
             } catch (e) {
-              console.log('Az app nem aludt, vagy nem találtam ébresztő gombot.');
+              console.log('Az app nem aludt, vagy nem volt szükség ébresztésre.');
             }
 
-            // Várunk, amíg a Streamlit app ténylegesen betölt (emelt időkorlát: 90 másodperc)
             console.log('Várakozás az app betöltésére...');
             await page.waitForSelector('.stApp', { timeout: 90000 });
             
