@@ -2,7 +2,7 @@ name: Canyon Inventory Trigger
 
 on:
   schedule:
-    - cron: '0 * * * *'  # Minden óra 0. percében lefut (módosíthatod igény szerint)
+    - cron: '0 * * * *'  # Minden óra 0. percében lefut
   workflow_dispatch:     # Ezzel kapsz egy manuális "Run workflow" gombot is a GitHubon
 
 jobs:
@@ -29,8 +29,7 @@ jobs:
             const page = await browser.newPage();
             
             console.log('Navigálás a Streamlit appra...');
-            // CSERÉLD KI az alábbi URL-t a te pontos Streamlit appod címére, ha eltér!
-            await page.goto('https://canyon-inventory-check.streamlit.app/?run=true', { waitUntil: 'domcontentloaded' });
+            await page.goto('https://canyon.streamlit.app/?run=true', { waitUntil: 'domcontentloaded' });
             
             try {
               // Megkeressük a Streamlit alvó gombját, ha elaludt volna az app
