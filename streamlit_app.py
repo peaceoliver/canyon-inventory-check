@@ -16,7 +16,10 @@ import streamlit as st
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+
+
+# A webdriver_manager-re nincs szükség, a beépített Linux drivert fogjuk használni
+#from webdriver_manager.chrome import ChromeDriverManager
 
 try:
     import sqlitecloud
@@ -195,19 +198,27 @@ def init_driver():
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
     
-    # Ha a Streamlit Cloudon fut, a rendszerszintű krómot használjuk
-    if os.path.exists("/usr/bin/chromium-browser"):
-        chrome_options.binary_location = "/usr/bin/chromium-browser"
+    # 1. Ellenőrizzük a Streamlit Cloud / Linux útvonalakat (mindkét verziót)
+    chromium_path = None
+    for path in ["/usr/bin/chromium", "/usr/bin/chromium-browser"]:
+        if os.path.exists(path):
+            chromium_path = path
+            break
+
+    if chromium_path:
+        chrome_options.binary_location = chromium_path
         try:
-            return webdriver.Chrome(options=chrome_options)
+            # Kényszerítjük a Linux által telepített, verzióban pontosan passzoló drivert
+            service = Service("/usr/bin/chromedriver")
+            return webdriver.Chrome(service=service, options=chrome_options)
         except Exception as e:
             st.error(f"Hiba a felhős böngésző indításakor: {e}")
             return None
             
-    # Ha helyi környezetben (pl. VS Code) fut, letöltjük a drivert automatikusan
+    # 2. Helyi környezet fallback (pl. ha otthon Windows/Mac alól futtatod)
     try:
-        service = Service(ChromeDriverManager().install())
-        return webdriver.Chrome(service=service, options=chrome_options)
+        # A modern Selenium 4 már automatikusan letölti a megfelelő verziót, ha nem adunk meg Service-t
+        return webdriver.Chrome(options=chrome_options)
     except Exception as e:
         st.error(f"Hiba a helyi böngésző indításakor: {e}")
         return None
